@@ -1,0 +1,14 @@
+[Unit]
+Description=Portfolio browser VNC gateway (local only)
+After=portfolio-vnc.service
+Requires=portfolio-vnc.service
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5901
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

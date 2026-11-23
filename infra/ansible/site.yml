@@ -1,0 +1,80 @@
+---
+- hosts: all
+  become: true
+  vars:
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=accept-new'
+  tasks:
+    - name: Retirar gestor de reglas incompatible con UFW
+      apt: { name: iptables-persistent, state: absent }
+    - name: Instalar Docker, Git y firewall
+      apt:
+        name: [docker.io, docker-compose-v2, git, ufw, iptables]
+        update_cache: true
+        state: present
+    - name: Activar Docker
+      service: { name: docker, state: started, enabled: true }
+    - name: Permitir SSH
+      community.general.ufw: { rule: allow, port: '22', proto: tcp }
+    - name: Permitir HTTP
+      community.general.ufw: { rule: allow, port: '80', proto: tcp }
+    - name: Permitir HTTPS
+      community.general.ufw: { rule: allow, port: '443', proto: tcp }
+    - name: Activar firewall
+      community.general.ufw: { state: enabled, policy: deny }
+    - name: Instalar escritorio y VNC
+      apt:
+        name: [tigervnc-standalone-server, xfce4, xfce4-terminal, dbus-x11, novnc, websockify]
+        install_recommends: false
+        state: present
+    - name: Crear directorio VNC del usuario
+      file: { path: /home/ubuntu/.vnc, state: directory, owner: ubuntu, group: ubuntu, mode: '0700' }
+    - name: Configurar sesión XFCE
+      copy:
+        src: files/xstartup
+        dest: /home/ubuntu/.vnc/xstartup
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      notify: Reiniciar VNC
+    - name: Configurar servicio VNC
+      copy:
+        src: files/portfolio-vnc.service
+        dest: /etc/systemd/system/portfolio-vnc.service
+        mode: '0644'
+      notify: Reiniciar VNC
+    - name: Configurar acceso web a VNC
+      copy:
+        src: files/portfolio-novnc.service
+        dest: /etc/systemd/system/portfolio-novnc.service
+        mode: '0644'
+      notify: Reiniciar noVNC
+    - name: Activar VNC
+      systemd: { name: portfolio-vnc, state: started, enabled: true, daemon_reload: true }
+    - name: Activar noVNC
+      systemd: { name: portfolio-novnc, state: started, enabled: true, daemon_reload: true }
+    - name: Crear directorio de aplicación
+      file: { path: /opt/portfolio, state: directory, mode: '0755' }
+    - name: Escribir Compose
+      copy:
+        dest: /opt/portfolio/docker-compose.yml
+        content: |
+          services:
+            frontend:
+              image: {{ dockerhub_username }}/portfolio-frontend:latest
+              restart: unless-stopped
+              ports: ["80:3000"]
+              depends_on: [backend]
+            backend:
+              image: {{ dockerhub_username }}/portfolio-backend:latest
+              restart: unless-stopped
+              volumes: ["portfolio_data:/app/data"]
+          volumes:
+            portfolio_data:
+    - name: Descargar y arrancar imagen
+      command: docker compose -f /opt/portfolio/docker-compose.yml up -d --pull always
+      changed_when: true
+  handlers:
+    - name: Reiniciar VNC
+      systemd: { name: portfolio-vnc, state: restarted, daemon_reload: true }
+    - name: Reiniciar noVNC
+      systemd: { name: portfolio-novnc, state: restarted, daemon_reload: true }

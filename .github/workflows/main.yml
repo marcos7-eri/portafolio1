@@ -1,0 +1,114 @@
+name: Publicar MAIN
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm ci --prefix backend
+      - run: npm ci --prefix frontend
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - run: npm run build
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/portfolio-frontend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/portfolio-frontend:${{ github.sha }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/portfolio-backend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/portfolio-backend:${{ github.sha }}
+  deploy:
+    needs: publish
+    if: ${{ vars.ENABLE_DEPLOY == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Instalar Ansible
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ansible
+          ansible-galaxy collection install community.general
+      - name: Configurar SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+      - name: Configurar clave API de OCI
+        env:
+          OCI_API_PRIVATE_KEY: ${{ secrets.OCI_API_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+      - name: Crear infraestructura
+        working-directory: infra/terraform
+        env:
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_PRIVATE_KEY_PATH: /home/runner/.oci/oci_api_key.pem
+          OCI_REGION: ${{ vars.OCI_REGION || 'sa-saopaulo-1' }}
+          OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
+          TF_VAR_region: ${{ vars.OCI_REGION || 'sa-saopaulo-1' }}
+          TF_VAR_compartment_ocid: ${{ secrets.OCI_COMPARTMENT_OCID }}
+          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+        run: |
+          terraform init -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="namespace=$OCI_NAMESPACE" -backend-config="key=portfolio/terraform.tfstate" -backend-config="region=$OCI_REGION" -backend-config="tenancy_ocid=$OCI_TENANCY_OCID" -backend-config="user_ocid=$OCI_USER_OCID" -backend-config="fingerprint=$OCI_FINGERPRINT" -backend-config="private_key_path=$OCI_PRIVATE_KEY_PATH"
+          terraform apply -auto-approve -no-color 2>&1 | tee /tmp/portfolio-apply.log
+          terraform output -raw public_ip > /tmp/portfolio_ip
+      - name: Resumir error de OCI
+        if: failure()
+        run: |
+          if [ -f /tmp/portfolio-apply.log ]; then
+            {
+              echo '### Error de Terraform en OCI'
+              grep -m1 '^Error:' /tmp/portfolio-apply.log | sed -E 's/ocid1\.[[:alnum:]_.-]+/[OCID oculto]/g' || true
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Configurar VM y desplegar
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          IP=$(cat /tmp/portfolio_ip)
+          for i in {1..60}; do
+            if timeout 3 bash -c "</dev/tcp/$IP/22" 2>/dev/null; then break; fi
+            sleep 10
+          done
+          timeout 3 bash -c "</dev/tcp/$IP/22"
+          ansible-playbook -i "$IP," -u ubuntu --private-key ~/.ssh/id_ed25519 infra/ansible/site.yml -e "dockerhub_username=$DOCKERHUB_USERNAME"

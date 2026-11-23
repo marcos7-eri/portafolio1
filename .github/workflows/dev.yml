@@ -1,0 +1,59 @@
+name: Pruebas portafolio DEV
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev, main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm ci --prefix backend
+      - run: npm ci --prefix frontend
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:unit
+      - run: npm run test:integration
+      - run: npm run test:e2e
+      - run: npm run build
+      - name: Construir imagen frontend
+        run: docker build -f frontend/Dockerfile -t portfolio-frontend:test .
+      - name: Construir imagen backend
+        run: docker build -f backend/Dockerfile -t portfolio-backend:test .
+      - uses: hashicorp/setup-terraform@v3
+      - name: Validar infraestructura OCI
+        working-directory: infra/terraform
+        run: |
+          terraform fmt -check
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: Configurar clave API de OCI
+        if: github.event_name == 'push' && vars.ENABLE_DEPLOY == 'true'
+        env:
+          OCI_API_PRIVATE_KEY: ${{ secrets.OCI_API_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_API_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+      - name: Planificar infraestructura OCI
+        if: github.event_name == 'push' && vars.ENABLE_DEPLOY == 'true'
+        working-directory: infra/terraform
+        env:
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_PRIVATE_KEY_PATH: /home/runner/.oci/oci_api_key.pem
+          OCI_REGION: ${{ vars.OCI_REGION || 'sa-saopaulo-1' }}
+          OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
+          TF_VAR_region: ${{ vars.OCI_REGION || 'sa-saopaulo-1' }}
+          TF_VAR_compartment_ocid: ${{ secrets.OCI_COMPARTMENT_OCID }}
+          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+        run: |
+          terraform init -reconfigure -input=false -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="namespace=$OCI_NAMESPACE" -backend-config="key=portfolio/terraform.tfstate" -backend-config="region=$OCI_REGION" -backend-config="tenancy_ocid=$OCI_TENANCY_OCID" -backend-config="user_ocid=$OCI_USER_OCID" -backend-config="fingerprint=$OCI_FINGERPRINT" -backend-config="private_key_path=$OCI_PRIVATE_KEY_PATH"
+          terraform plan -input=false -no-color

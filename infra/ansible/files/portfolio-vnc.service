@@ -1,0 +1,15 @@
+[Unit]
+Description=Portfolio remote desktop (local VNC)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStart=/usr/bin/tigervncserver :1 -fg -localhost yes -SecurityTypes None -geometry 1280x800 -depth 24 -xstartup /home/ubuntu/.vnc/xstartup
+ExecStop=/usr/bin/tigervncserver -kill :1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

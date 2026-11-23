@@ -1,0 +1,23 @@
+services:
+  frontend:
+    image: ${DOCKERHUB_USERNAME:-local}/portfolio-frontend:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:3000"
+    depends_on:
+      - backend
+  backend:
+    image: ${DOCKERHUB_USERNAME:-local}/portfolio-backend:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - portfolio_data:/app/data
+    environment:
+      DB_FILE: /app/data/portfolio.sqlite
+volumes:
+  portfolio_data:
